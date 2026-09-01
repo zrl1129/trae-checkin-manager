@@ -24,7 +24,7 @@ pub fn launch_trae(exe_path: &Path, user_data_dir: &str, debug_port: u16) -> Res
 
 pub fn kill_trae_pid(pid: u32) -> Result<()> {
     let mut cmd = Command::new("taskkill");
-    cmd.args(["/F", "/PID", &pid.to_string()]);
+    cmd.args(["/F", "/T", "/PID", &pid.to_string()]);
 
     #[cfg(target_os = "windows")]
     {
@@ -38,7 +38,7 @@ pub fn kill_trae_pid(pid: u32) -> Result<()> {
 
 pub fn kill_trae_by_name() -> Result<()> {
     let mut cmd = Command::new("taskkill");
-    cmd.args(["/F", "/IM", "TRAE SOLO CN.exe"]);
+    cmd.args(["/F", "/T", "/IM", "TRAE SOLO CN.exe"]);
 
     #[cfg(target_os = "windows")]
     {

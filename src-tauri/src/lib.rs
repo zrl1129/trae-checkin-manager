@@ -208,6 +208,14 @@ fn bind_account_to_instance(id: String, account_id: Option<String>, state: tauri
 #[tauri::command]
 async fn launch_instance(id: String, state: tauri::State<'_, AppState>) -> Result<u32, String> {
     let instance = state.instances.get(&id).ok_or_else(|| format!("实例不存在: {}", id))?;
+
+    if let Some(pid) = trae::storage_reader::read_code_lock_pid(&instance.data_dir) {
+        if trae::process::is_process_running(pid) {
+            let _ = trae::process::kill_trae_pid(pid);
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+    }
+
     let exe_path = trae::path::find_trae_exe().ok_or_else(|| "未找到 TRAE 可执行文件".to_string())?;
     let pid = trae::process::launch_trae(&exe_path, &instance.data_dir, instance.debug_port).map_err(|e| e.to_string())?;
     state.pids.lock().unwrap().insert(id.clone(), pid);
@@ -357,6 +365,14 @@ async fn do_checkin(account_id: &str, state: &tauri::State<'_, AppState>) -> Che
     };
 
     if !trae::process::is_debug_port_open(instance.debug_port).await {
+        if let Some(pid) = trae::storage_reader::read_code_lock_pid(&instance.data_dir) {
+            if trae::process::is_process_running(pid) {
+                log::info!("TRAE already running (pid={}), killing to relaunch with debug port", pid);
+                let _ = trae::process::kill_trae_pid(pid);
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+        }
+
         let exe_path = match trae::path::find_trae_exe() {
             Some(p) => p,
             None => return CheckinRecord {
