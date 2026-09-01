@@ -40,3 +40,56 @@ pub struct CheckinRecord {
 pub struct CheckinStore {
     pub records: Vec<CheckinRecord>,
 }
+
+impl CheckinStore {
+    pub fn has_checked_today(&self, account_id: &str) -> bool {
+        let today = chrono::Local::now().date_naive();
+        self.records.iter().any(|r| {
+            r.account_id == account_id
+                && r.checkin_time.is_some()
+                && {
+                    let ts = r.checkin_time.unwrap();
+                    let dt = chrono::DateTime::from_timestamp(ts, 0)
+                        .unwrap_or_default()
+                        .with_timezone(&chrono::Local);
+                    dt.date_naive() == today
+                }
+                && (r.status == CheckinStatus::Success || r.status == CheckinStatus::AlreadySigned)
+        })
+    }
+
+    pub fn today_records(&self) -> Vec<&CheckinRecord> {
+        let today = chrono::Local::now().date_naive();
+        self.records
+            .iter()
+            .filter(|r| {
+                r.checkin_time.is_some()
+                    && {
+                        let ts = r.checkin_time.unwrap();
+                        let dt = chrono::DateTime::from_timestamp(ts, 0)
+                            .unwrap_or_default()
+                            .with_timezone(&chrono::Local);
+                        dt.date_naive() == today
+                    }
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CheckinEvent {
+    pub account_id: String,
+    pub account_name: String,
+    pub status: CheckinStatus,
+    pub detail: String,
+    pub points: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchSummary {
+    pub total: usize,
+    pub success: usize,
+    pub already_signed: usize,
+    pub failed: usize,
+    pub skipped: usize,
+}

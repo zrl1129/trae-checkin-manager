@@ -1,21 +1,25 @@
 mod account;
 mod checkin;
 mod instance;
+mod scheduler;
 mod state;
 mod storage;
 mod trae;
 
 use std::collections::HashMap;
 
+use tauri::{Emitter, Manager};
 use state::AppState;
 
 use account::types::Account;
-use checkin::types::CheckinRecord;
+use checkin::types::{BatchSummary, CheckinEvent, CheckinRecord, CheckinStatus};
 use instance::types::TraeInstance;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let auto_checkin = std::env::args().any(|a| a == "--auto-checkin");
+
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(init_state())
         .invoke_handler(tauri::generate_handler![
@@ -30,9 +34,87 @@ pub fn run() {
             stop_instance,
             check_instance_running,
             perform_checkin,
+            batch_checkin,
             get_checkin_records,
             find_trae_path,
-        ])
+            setup_scheduled_task,
+            remove_scheduled_task,
+            get_scheduled_task_status,
+        ]);
+
+    if auto_checkin {
+        builder = builder.setup(|app| {
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let state = handle.state::<AppState>();
+                let accounts = state.accounts.get_all();
+                log::info!("自动签到启动，共 {} 个账号", accounts.len());
+
+                for acc in &accounts {
+                    let instance = state.instances.get_by_account(&acc.id);
+                    if instance.is_none() {
+                        let _ = handle.emit(
+                            "checkin-status",
+                            CheckinEvent {
+                                account_id: acc.id.clone(),
+                                account_name: acc.name.clone(),
+                                status: CheckinStatus::Failed,
+                                detail: "未关联实例".to_string(),
+                                points: None,
+                            },
+                        );
+                        continue;
+                    }
+
+                    {
+                        let store = state.checkin_store.lock().unwrap();
+                        if store.has_checked_today(&acc.id) {
+                            let _ = handle.emit(
+                                "checkin-status",
+                                CheckinEvent {
+                                    account_id: acc.id.clone(),
+                                    account_name: acc.name.clone(),
+                                    status: CheckinStatus::AlreadySigned,
+                                    detail: "今日已签到".to_string(),
+                                    points: None,
+                                },
+                            );
+                            continue;
+                        }
+                    }
+
+                    let _ = handle.emit(
+                        "checkin-status",
+                        CheckinEvent {
+                            account_id: acc.id.clone(),
+                            account_name: acc.name.clone(),
+                            status: CheckinStatus::InProgress,
+                            detail: "正在签到...".to_string(),
+                            points: None,
+                        },
+                    );
+
+                    let record = do_checkin(&acc.id, &state).await;
+
+                    let _ = handle.emit(
+                        "checkin-status",
+                        CheckinEvent {
+                            account_id: acc.id.clone(),
+                            account_name: acc.name.clone(),
+                            status: record.status.clone(),
+                            detail: record.detail.clone(),
+                            points: record.points,
+                        },
+                    );
+                }
+
+                log::info!("自动签到完成");
+            });
+            Ok(())
+        });
+    }
+
+    builder
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -158,45 +240,243 @@ async fn check_instance_running(
 #[tauri::command]
 async fn perform_checkin(
     account_id: String,
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<CheckinRecord, String> {
-    let instance = state
-        .instances
-        .get_by_account(&account_id)
-        .ok_or_else(|| "该账号没有关联的实例，请先创建实例".to_string())?;
+    let account = state
+        .accounts
+        .get(&account_id)
+        .ok_or_else(|| "账号不存在".to_string())?;
+    let account_name = account.name.clone();
 
-    if !trae::process::is_debug_port_open(instance.debug_port).await {
-        let exe_path = trae::path::find_trae_exe()
-            .ok_or_else(|| "未找到 TRAE 可执行文件".to_string())?;
+    let _ = app.emit(
+        "checkin-status",
+        CheckinEvent {
+            account_id: account_id.clone(),
+            account_name: account_name.clone(),
+            status: CheckinStatus::InProgress,
+            detail: "正在签到...".to_string(),
+            points: None,
+        },
+    );
 
-        let pid = trae::process::launch_trae(&exe_path, &instance.data_dir, instance.debug_port)
-            .map_err(|e| e.to_string())?;
+    let record = do_checkin(&account_id, &state).await;
 
-        state
-            .pids
-            .lock()
-            .unwrap()
-            .insert(instance.id.clone(), pid);
+    let _ = app.emit(
+        "checkin-status",
+        CheckinEvent {
+            account_id: account_id.clone(),
+            account_name,
+            status: record.status.clone(),
+            detail: record.detail.clone(),
+            points: record.points,
+        },
+    );
 
-        trae::process::wait_for_debug_port(instance.debug_port, 30000)
-            .await
-            .map_err(|e| e.to_string())?;
+    Ok(record)
+}
+
+#[tauri::command]
+async fn batch_checkin(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<BatchSummary, String> {
+    let accounts = state.accounts.get_all();
+    let total = accounts.len();
+
+    let mut success = 0;
+    let mut already_signed = 0;
+    let mut failed = 0;
+    let mut skipped = 0;
+
+    for acc in &accounts {
+        let instance = state.instances.get_by_account(&acc.id);
+        if instance.is_none() {
+            skipped += 1;
+            let _ = app.emit(
+                "checkin-status",
+                CheckinEvent {
+                    account_id: acc.id.clone(),
+                    account_name: acc.name.clone(),
+                    status: CheckinStatus::Failed,
+                    detail: "未关联实例".to_string(),
+                    points: None,
+                },
+            );
+            continue;
+        }
+
+        {
+            let store = state.checkin_store.lock().unwrap();
+            if store.has_checked_today(&acc.id) {
+                already_signed += 1;
+                let _ = app.emit(
+                    "checkin-status",
+                    CheckinEvent {
+                        account_id: acc.id.clone(),
+                        account_name: acc.name.clone(),
+                        status: CheckinStatus::AlreadySigned,
+                        detail: "今日已签到".to_string(),
+                        points: None,
+                    },
+                );
+                continue;
+            }
+        }
+
+        let _ = app.emit(
+            "checkin-status",
+            CheckinEvent {
+                account_id: acc.id.clone(),
+                account_name: acc.name.clone(),
+                status: CheckinStatus::InProgress,
+                detail: "正在签到...".to_string(),
+                points: None,
+            },
+        );
+
+        let record = do_checkin(&acc.id, &state).await;
+
+        let _ = app.emit(
+            "checkin-status",
+            CheckinEvent {
+                account_id: acc.id.clone(),
+                account_name: acc.name.clone(),
+                status: record.status.clone(),
+                detail: record.detail.clone(),
+                points: record.points,
+            },
+        );
+
+        match record.status {
+            CheckinStatus::Success => success += 1,
+            CheckinStatus::AlreadySigned => already_signed += 1,
+            CheckinStatus::NotLoggedIn | CheckinStatus::Failed => failed += 1,
+            _ => {}
+        }
     }
 
-    let mut cdp = checkin::cdp::CdpClient::connect(instance.debug_port)
-        .await
-        .map_err(|e| e.to_string())?;
+    Ok(BatchSummary {
+        total,
+        success,
+        already_signed,
+        failed,
+        skipped,
+    })
+}
 
-    let result = checkin::flow::perform_checkin(&mut cdp)
-        .await
-        .map_err(|e| e.to_string())?;
+async fn do_checkin(
+    account_id: &str,
+    state: &tauri::State<'_, AppState>,
+) -> CheckinRecord {
+    let instance = match state.instances.get_by_account(account_id) {
+        Some(inst) => inst,
+        None => {
+            return CheckinRecord {
+                id: uuid::Uuid::new_v4().to_string(),
+                account_id: account_id.to_string(),
+                instance_id: String::new(),
+                status: CheckinStatus::Failed,
+                detail: "未关联实例".to_string(),
+                points: None,
+                checkin_time: None,
+                created_at: chrono::Utc::now().timestamp(),
+            };
+        }
+    };
+
+    if !trae::process::is_debug_port_open(instance.debug_port).await {
+        let exe_path = match trae::path::find_trae_exe() {
+            Some(p) => p,
+            None => {
+                return CheckinRecord {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    account_id: account_id.to_string(),
+                    instance_id: instance.id.clone(),
+                    status: CheckinStatus::Failed,
+                    detail: "未找到 TRAE 可执行文件".to_string(),
+                    points: None,
+                    checkin_time: None,
+                    created_at: chrono::Utc::now().timestamp(),
+                };
+            }
+        };
+
+        match trae::process::launch_trae(&exe_path, &instance.data_dir, instance.debug_port) {
+            Ok(pid) => {
+                state
+                    .pids
+                    .lock()
+                    .unwrap()
+                    .insert(instance.id.clone(), pid);
+            }
+            Err(e) => {
+                return CheckinRecord {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    account_id: account_id.to_string(),
+                    instance_id: instance.id.clone(),
+                    status: CheckinStatus::Failed,
+                    detail: format!("启动 TRAE 失败: {}", e),
+                    points: None,
+                    checkin_time: None,
+                    created_at: chrono::Utc::now().timestamp(),
+                };
+            }
+        }
+
+        if let Err(e) = trae::process::wait_for_debug_port(instance.debug_port, 30000).await {
+            return CheckinRecord {
+                id: uuid::Uuid::new_v4().to_string(),
+                account_id: account_id.to_string(),
+                instance_id: instance.id.clone(),
+                status: CheckinStatus::Failed,
+                detail: format!("等待调试端口超时: {}", e),
+                points: None,
+                checkin_time: None,
+                created_at: chrono::Utc::now().timestamp(),
+            };
+        }
+    }
+
+    let mut cdp = match checkin::cdp::CdpClient::connect(instance.debug_port).await {
+        Ok(c) => c,
+        Err(e) => {
+            return CheckinRecord {
+                id: uuid::Uuid::new_v4().to_string(),
+                account_id: account_id.to_string(),
+                instance_id: instance.id.clone(),
+                status: CheckinStatus::Failed,
+                detail: format!("CDP 连接失败: {}", e),
+                points: None,
+                checkin_time: None,
+                created_at: chrono::Utc::now().timestamp(),
+            };
+        }
+    };
+
+    let result = match checkin::flow::perform_checkin(&mut cdp).await {
+        Ok(r) => r,
+        Err(e) => {
+            cdp.close().await;
+            return CheckinRecord {
+                id: uuid::Uuid::new_v4().to_string(),
+                account_id: account_id.to_string(),
+                instance_id: instance.id.clone(),
+                status: CheckinStatus::Failed,
+                detail: format!("签到流程错误: {}", e),
+                points: None,
+                checkin_time: None,
+                created_at: chrono::Utc::now().timestamp(),
+            };
+        }
+    };
 
     cdp.close().await;
 
     let now = chrono::Utc::now().timestamp();
     let record = CheckinRecord {
         id: uuid::Uuid::new_v4().to_string(),
-        account_id: account_id.clone(),
+        account_id: account_id.to_string(),
         instance_id: instance.id.clone(),
         status: result.status,
         detail: result.detail,
@@ -208,10 +488,10 @@ async fn perform_checkin(
     {
         let mut store = state.checkin_store.lock().unwrap();
         store.records.push(record.clone());
-        storage::write_json("checkin.json", &*store).map_err(|e| e.to_string())?;
+        let _ = storage::write_json("checkin.json", &*store);
     }
 
-    Ok(record)
+    record
 }
 
 #[tauri::command]
@@ -229,4 +509,25 @@ fn find_trae_path() -> String {
     trae::path::find_trae_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "未找到".to_string())
+}
+
+#[tauri::command]
+fn setup_scheduled_task(
+    hour: u32,
+    minute: u32,
+) -> Result<(), String> {
+    let exe_path = std::env::current_exe()
+        .map_err(|e| e.to_string())?;
+    scheduler::create_task(&exe_path.display().to_string(), hour, minute)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn remove_scheduled_task() -> Result<(), String> {
+    scheduler::remove_task().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_scheduled_task_status() -> Result<bool, String> {
+    scheduler::task_exists().map_err(|e| e.to_string())
 }

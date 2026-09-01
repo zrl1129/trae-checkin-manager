@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Account, TraeInstance, CheckinRecord } from "./types";
+import { listen } from "@tauri-apps/api/event";
+import type { Account, TraeInstance, CheckinRecord, CheckinEvent, BatchSummary } from "./types";
 
 export function getAccounts(): Promise<Account[]> {
   return invoke<Account[]>("get_accounts");
@@ -60,10 +61,30 @@ export function performCheckin(accountId: string): Promise<CheckinRecord> {
   return invoke<CheckinRecord>("perform_checkin", { accountId });
 }
 
+export function batchCheckin(): Promise<BatchSummary> {
+  return invoke<BatchSummary>("batch_checkin");
+}
+
 export function getCheckinRecords(): Promise<CheckinRecord[]> {
   return invoke<CheckinRecord[]>("get_checkin_records");
 }
 
 export function findTraePath(): Promise<string> {
   return invoke<string>("find_trae_path");
+}
+
+export function setupScheduledTask(hour: number, minute: number): Promise<void> {
+  return invoke<void>("setup_scheduled_task", { hour, minute });
+}
+
+export function removeScheduledTask(): Promise<void> {
+  return invoke<void>("remove_scheduled_task");
+}
+
+export function getScheduledTaskStatus(): Promise<boolean> {
+  return invoke<boolean>("get_scheduled_task_status");
+}
+
+export function onCheckinStatus(callback: (event: CheckinEvent) => void) {
+  return listen<CheckinEvent>("checkin-status", (e) => callback(e.payload));
 }

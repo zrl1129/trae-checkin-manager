@@ -1,14 +1,17 @@
 import { useState, useEffect, useCallback } from "react";
-import type { Account, TraeInstance, CheckinRecord, CheckinStatus } from "../types";
+import type { Account, TraeInstance, CheckinRecord, CheckinEvent, BatchSummary } from "../types";
 import { statusLabels, statusColors } from "../types";
+import type { CheckinStatus } from "../types";
 import * as api from "../api";
 
 export default function CheckinPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [instances, setInstances] = useState<TraeInstance[]>([]);
   const [records, setRecords] = useState<CheckinRecord[]>([]);
+  const [liveStatus, setLiveStatus] = useState<Record<string, CheckinEvent>>({});
   const [checkingIds, setCheckingIds] = useState<Set<string>>(new Set());
-  const [results, setResults] = useState<Record<string, CheckinRecord>>({});
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [batchSummary, setBatchSummary] = useState<BatchSummary | null>(null);
   const [error, setError] = useState("");
 
   const load = useCallback(async () => {
@@ -20,32 +23,51 @@ export default function CheckinPage() {
     setAccounts(accs);
     setInstances(insts);
     setRecords(recs);
-
-    const resultMap: Record<string, CheckinRecord> = {};
-    const today = new Date().toDateString();
-    for (const r of recs) {
-      if (r.checkin_time && new Date(r.checkin_time * 1000).toDateString() === today) {
-        if (!resultMap[r.account_id] || r.created_at > resultMap[r.account_id].created_at) {
-          resultMap[r.account_id] = r;
-        }
-      }
-    }
-    setResults(resultMap);
   }, []);
 
   useEffect(() => {
     load();
+    const unlisten = api.onCheckinStatus((event) => {
+      setLiveStatus((prev) => ({ ...prev, [event.account_id]: event }));
+      if (event.status === "in_progress") {
+        setCheckingIds((prev) => new Set(prev).add(event.account_id));
+      } else {
+        setCheckingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(event.account_id);
+          return next;
+        });
+        load();
+      }
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
   }, [load]);
 
   const getInstance = (accountId: string) =>
     instances.find((i) => i.account_id === accountId);
 
+  const getLatestRecord = useCallback(
+    (accountId: string): CheckinRecord | undefined => {
+      const today = new Date().toDateString();
+      return records
+        .filter(
+          (r) =>
+            r.account_id === accountId &&
+            r.checkin_time &&
+            new Date(r.checkin_time * 1000).toDateString() === today
+        )
+        .sort((a, b) => b.created_at - a.created_at)[0];
+    },
+    [records]
+  );
+
   const handleCheckin = async (accountId: string) => {
     setCheckingIds((prev) => new Set(prev).add(accountId));
     setError("");
     try {
-      const record = await api.performCheckin(accountId);
-      setResults((prev) => ({ ...prev, [accountId]: record }));
+      await api.performCheckin(accountId);
       await load();
     } catch (e: any) {
       setError(e.toString());
@@ -55,6 +77,21 @@ export default function CheckinPage() {
         next.delete(accountId);
         return next;
       });
+    }
+  };
+
+  const handleBatchCheckin = async () => {
+    setBatchRunning(true);
+    setBatchSummary(null);
+    setError("");
+    try {
+      const summary = await api.batchCheckin();
+      setBatchSummary(summary);
+      await load();
+    } catch (e: any) {
+      setError(e.toString());
+    } finally {
+      setBatchRunning(false);
     }
   };
 
@@ -76,24 +113,74 @@ export default function CheckinPage() {
   };
 
   const getStatusBadge = (accountId: string) => {
-    const record = results[accountId];
-    if (checkingIds.has(accountId)) {
+    const live = liveStatus[accountId];
+    if (checkingIds.has(accountId) || (live && live.status === "in_progress")) {
       return <span className={statusColors.in_progress}>{statusLabels.in_progress}</span>;
     }
+    if (live) {
+      return <span className={statusColors[live.status as CheckinStatus]}>{statusLabels[live.status as CheckinStatus]}</span>;
+    }
+    const record = getLatestRecord(accountId);
     if (record) {
       return <span className={statusColors[record.status]}>{statusLabels[record.status]}</span>;
     }
     return <span className="badge-neutral">{statusLabels.pending}</span>;
   };
 
+  const getDetail = (accountId: string) => {
+    const live = liveStatus[accountId];
+    if (live) return live;
+    const record = getLatestRecord(accountId);
+    return record
+      ? {
+          account_id: record.account_id,
+          account_name: "",
+          status: record.status,
+          detail: record.detail,
+          points: record.points,
+        }
+      : null;
+  };
+
   return (
     <div className="p-8 max-w-4xl">
-      <div className="mb-6">
-        <h2 className="text-xl font-semibold text-white">签到中心</h2>
-        <p className="text-sm text-gray-500 mt-1">
-          选择账号执行签到，自动启动 TRAE 实例并完成 CDP 签到流程
-        </p>
+      <div className="mb-6 flex items-center justify-between">
+        <div>
+          <h2 className="text-xl font-semibold text-white">签到中心</h2>
+          <p className="text-sm text-gray-500 mt-1">
+            一键批量签到所有未签到账号，实时显示签到状态
+          </p>
+        </div>
+        <button
+          className="btn-primary text-sm px-5 py-2.5"
+          onClick={handleBatchCheckin}
+          disabled={batchRunning || accounts.length === 0}
+        >
+          {batchRunning ? "批量签到中..." : "一键签到全部"}
+        </button>
       </div>
+
+      {batchSummary && (
+        <div className="mb-4 px-4 py-3 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-6 text-sm">
+            <span className="text-gray-400">
+              共 <span className="text-white font-mono">{batchSummary.total}</span> 个
+            </span>
+            <span className="text-emerald-400">
+              成功 <span className="font-mono">{batchSummary.success}</span>
+            </span>
+            <span className="text-blue-400">
+              已签 <span className="font-mono">{batchSummary.already_signed}</span>
+            </span>
+            <span className="text-red-400">
+              失败 <span className="font-mono">{batchSummary.failed}</span>
+            </span>
+            <span className="text-gray-500">
+              跳过 <span className="font-mono">{batchSummary.skipped}</span>
+            </span>
+          </div>
+        </div>
+      )}
 
       {error && (
         <div className="mb-4 px-4 py-2.5 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm">
@@ -112,8 +199,8 @@ export default function CheckinPage() {
         <div className="space-y-3 mb-8">
           {accounts.map((acc) => {
             const inst = getInstance(acc.id);
-            const isChecking = checkingIds.has(acc.id);
-            const record = results[acc.id];
+            const isChecking = checkingIds.has(acc.id) || (liveStatus[acc.id]?.status === "in_progress");
+            const detail = getDetail(acc.id);
             return (
               <div key={acc.id} className="card-hover">
                 <div className="flex items-center justify-between">
@@ -140,26 +227,28 @@ export default function CheckinPage() {
                         </span>
                       )}
                     </div>
-                    {record && (
+                    {detail && (
                       <div className="flex items-center gap-3 mt-1.5">
                         <span className="text-xs text-gray-500">
-                          {record.detail}
+                          {detail.detail}
                         </span>
-                        {record.points && (
+                        {detail.points && (
                           <span className="text-xs text-emerald-400 font-mono">
-                            +{record.points} 积分
+                            +{detail.points} 积分
                           </span>
                         )}
-                        <span className="text-xs text-gray-600 font-mono">
-                          {formatTime(record.checkin_time)}
-                        </span>
+                        {getLatestRecord(acc.id) && (
+                          <span className="text-xs text-gray-600 font-mono">
+                            {formatTime(getLatestRecord(acc.id)!.checkin_time)}
+                          </span>
+                        )}
                       </div>
                     )}
                   </div>
                   <button
                     className="btn-primary text-xs"
                     onClick={() => handleCheckin(acc.id)}
-                    disabled={isChecking || !inst}
+                    disabled={isChecking || !inst || batchRunning}
                   >
                     {isChecking ? "签到中..." : "签到"}
                   </button>

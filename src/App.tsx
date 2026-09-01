@@ -2,14 +2,16 @@ import { useState, useEffect } from "react";
 import AccountsPage from "./pages/AccountsPage";
 import InstancesPage from "./pages/InstancesPage";
 import CheckinPage from "./pages/CheckinPage";
+import SchedulerPage from "./pages/SchedulerPage";
 import { findTraePath } from "./api";
 
-type Tab = "checkin" | "accounts" | "instances";
+type Tab = "checkin" | "accounts" | "instances" | "scheduler";
 
 const navItems: { id: Tab; label: string }[] = [
   { id: "checkin", label: "签到中心" },
   { id: "accounts", label: "账号管理" },
   { id: "instances", label: "实例管理" },
+  { id: "scheduler", label: "定时设置" },
 ];
 
 function App() {
@@ -65,6 +67,7 @@ function App() {
         {tab === "checkin" && <CheckinPage />}
         {tab === "accounts" && <AccountsPage />}
         {tab === "instances" && <InstancesPage />}
+        {tab === "scheduler" && <SchedulerPage />}
       </main>
     </div>
   );

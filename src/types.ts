@@ -36,6 +36,22 @@ export interface CheckinRecord {
   created_at: number;
 }
 
+export interface CheckinEvent {
+  account_id: string;
+  account_name: string;
+  status: CheckinStatus;
+  detail: string;
+  points: number | null;
+}
+
+export interface BatchSummary {
+  total: number;
+  success: number;
+  already_signed: number;
+  failed: number;
+  skipped: number;
+}
+
 export const statusLabels: Record<CheckinStatus, string> = {
   pending: "待签到",
   in_progress: "签到中",
