@@ -1,0 +1,91 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-bg-primary text-gray-100;
+    font-family: "Inter", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-zinc-700 rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-zinc-600;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply px-4 py-2 rounded-lg font-medium text-sm transition-all duration-200 select-none;
+  }
+
+  .btn-primary {
+    @apply btn bg-accent-blue hover:bg-blue-600 text-white shadow-lg shadow-blue-500/20;
+  }
+
+  .btn-danger {
+    @apply btn bg-accent-red/10 hover:bg-accent-red/20 text-accent-red border border-accent-red/30;
+  }
+
+  .btn-ghost {
+    @apply btn hover:bg-white/5 text-gray-400 hover:text-gray-200;
+  }
+
+  .card {
+    @apply bg-bg-secondary border border-white/5 rounded-xl p-5 transition-all duration-200;
+  }
+
+  .card-hover {
+    @apply card hover:border-white/10 hover:bg-bg-tertiary;
+  }
+
+  .input {
+    @apply w-full bg-bg-tertiary border border-white/10 rounded-lg px-3 py-2 text-sm text-gray-100
+           placeholder-gray-500 focus:outline-none focus:border-accent-blue/50 focus:ring-1
+           focus:ring-accent-blue/30 transition-all duration-200;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium;
+  }
+
+  .badge-success {
+    @apply badge bg-emerald-500/10 text-emerald-400 border border-emerald-500/20;
+  }
+
+  .badge-pending {
+    @apply badge bg-amber-500/10 text-amber-400 border border-amber-500/20;
+  }
+
+  .badge-failed {
+    @apply badge bg-red-500/10 text-red-400 border border-red-500/20;
+  }
+
+  .badge-info {
+    @apply badge bg-blue-500/10 text-blue-400 border border-blue-500/20;
+  }
+
+  .badge-neutral {
+    @apply badge bg-zinc-500/10 text-zinc-400 border border-zinc-500/20;
+  }
+}
